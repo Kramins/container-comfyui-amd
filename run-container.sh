@@ -1,22 +1,40 @@
 #!/bin/bash
 
-# Check if the container is running and stop it if it is
-if [ "$(docker ps -q -f name=comfyui)" ]; then
-    echo "Stopping existing comfyui container..."
-    docker stop comfyui
-    sleep 5
+# ComfyUI Container Run Script
+# Usage: ./run-container.sh [VERSION]
+# VERSION: ComfyUI version tag (e.g., "latest", "git", "0.8.2") - defaults to "latest"
+
+VERSION="${1:-latest}"
+CONTAINER_NAME="comfyui"
+IMAGE="ghcr.io/kramins/comfyui-amd:$VERSION"
+COMFYUI_DATA="$HOME/comfyui"
+
+echo "🚀 Starting ComfyUI container"
+echo "   Version: $VERSION"
+echo "   Image: $IMAGE"
+echo "   Data directory: $COMFYUI_DATA"
+echo ""
+
+# Create data directories if they don't exist
+mkdir -p "$COMFYUI_DATA"/{models,custom_nodes,output,user,input,temp}
+
+# Stop and remove the container if it exists
+if [ "$(docker ps -q -f name=$CONTAINER_NAME)" ]; then
+    echo "⏹️  Stopping existing $CONTAINER_NAME container..."
+    docker stop $CONTAINER_NAME
+    sleep 2
 fi
 
-# Remove the container if it exists
-if [ "$(docker ps -a -q -f name=comfyui)" ]; then
-    echo "Removing existing comfyui container..."
-    docker rm comfyui
-    sleep 5
+if [ "$(docker ps -a -q -f name=$CONTAINER_NAME)" ]; then
+    echo "🗑️  Removing existing $CONTAINER_NAME container..."
+    docker rm $CONTAINER_NAME
+    sleep 1
 fi
 
-docker run --rm --privileged  -v /dev:/dev -p 8188:8188 \
--v ~/comfyui/models:/app/models \
--v ~/comfyui/custom_nodes:/app/custom_nodes \
--v ~/comfyui/output:/app/output \
--v ~/comfyui/user:/app/user \
---name comfyui kramins/comfyui-amd
+echo "▶️  Starting container..."
+docker run --rm -it --privileged \
+    -v /dev:/dev \
+    -p 8188:8188 \
+    -v "$COMFYUI_DATA":/data/ \
+    --name $CONTAINER_NAME \
+    $IMAGE

@@ -1,0 +1,143 @@
+name: Build ComfyUI Containers
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'Dockerfile'
+      - 'docker-bake.hcl'
+      - 'root/**'
+      - '.github/workflows/build.yml'
+      - '.github/scripts/detect-versions.sh'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Specific version to build (e.g., "git", "0.8.2", or leave empty for auto-detect)'
+        required: false
+        type: string
+      force_rebuild:
+        description: 'Force rebuild even if version exists'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  REGISTRY: ghcr.io
+  IMAGE_NAME: kramins/comfyui-amd
+
+jobs:
+  detect-versions:
+    name: Detect versions to build
+    runs-on: ubuntu-latest
+    outputs:
+      versions: ${{ steps.detect.outputs.versions }}
+      has_versions: ${{ steps.detect.outputs.has_versions }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Detect versions
+        id: detect
+        run: |
+          chmod +x .github/scripts/detect-versions.sh
+          
+          if [ -n "${{ github.event.inputs.version }}" ]; then
+            # Manual run with specific version
+            echo "🎯 Manual build requested for version: ${{ github.event.inputs.version }}"
+            VERSIONS='["${{ github.event.inputs.version }}"]'
+          else
+            # Auto-detect new versions
+            VERSIONS=$(.github/scripts/detect-versions.sh)
+          fi
+          
+          echo "versions=$VERSIONS" >> $GITHUB_OUTPUT
+          
+          if [ "$VERSIONS" = "[]" ] || [ "$VERSIONS" = "" ]; then
+            echo "has_versions=false" >> $GITHUB_OUTPUT
+            echo "✅ No versions to build"
+          else
+            echo "has_versions=true" >> $GITHUB_OUTPUT
+            echo "📦 Versions to build: $VERSIONS"
+          fi
+
+  build:
+    name: Build ComfyUI AMD (${{ matrix.version }})
+    runs-on: ubuntu-latest
+    needs: detect-versions
+    if: needs.detect-versions.outputs.has_versions == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ${{ fromJson(needs.detect-versions.outputs.versions) }}
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine if latest tag should be added
+        id: latest
+        run: |
+          VERSION="${{ matrix.version }}"
+          if [ "$VERSION" = "git" ]; then
+            echo "is_latest=false" >> $GITHUB_OUTPUT
+          else
+            # Check if this is the highest version number
+            ALL_VERSIONS='${{ needs.detect-versions.outputs.versions }}'
+            RELEASE_VERSIONS=$(echo "$ALL_VERSIONS" | jq -r '.[] | select(. != "git")')
+            HIGHEST_VERSION=$(echo "$RELEASE_VERSIONS" | sort -V -r | head -n1)
+            
+            if [ "$VERSION" = "$HIGHEST_VERSION" ]; then
+              echo "is_latest=true" >> $GITHUB_OUTPUT
+              echo "🏷️  Version $VERSION will be tagged as 'latest'"
+            else
+              echo "is_latest=false" >> $GITHUB_OUTPUT
+            fi
+          fi
+
+      - name: Build and push container
+        env:
+          COMFYUI_VERSIONS: '${{ matrix.version }}'
+          DOCKER_REPO: ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}
+          ADD_LATEST_TAG: ${{ steps.latest.outputs.is_latest }}
+        run: |
+          echo "🔨 Building version: ${{ matrix.version }}"
+          
+          # Export environment variables for docker bake
+          export COMFYUI_VERSIONS
+          export DOCKER_REPO
+          export ADD_LATEST_TAG
+          
+          # Build and push using docker bake
+          docker buildx bake \
+            --file docker-bake.hcl \
+            --push \
+            comfyui-amd
+
+      - name: Image summary
+        run: |
+          echo "### 🎉 Successfully built ComfyUI AMD v${{ matrix.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Image:** \`${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}\`" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "**Pull command:**" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`bash" >> $GITHUB_STEP_SUMMARY
+          echo "docker pull ${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${{ matrix.version }}" >> $GITHUB_STEP_SUMMARY
+          echo "\`\`\`" >> $GITHUB_STEP_SUMMARY
+          
+          if [ "${{ steps.latest.outputs.is_latest }}" = "true" ]; then
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "✨ This version is also tagged as \`latest\`" >> $GITHUB_STEP_SUMMARY
+          fi
