@@ -65,7 +65,7 @@ fi
 
 # Output as JSON array for GitHub Actions matrix
 if [ -n "$VERSIONS_TO_BUILD" ]; then
-    JSON_OUTPUT=$(echo "$VERSIONS_TO_BUILD" | tr ' ' '\n' | jq -R . | jq -s .)
+    JSON_OUTPUT=$(echo "$VERSIONS_TO_BUILD" | tr ' ' '\n' | jq -R . | jq -cs .)
     echo "$JSON_OUTPUT"
     echo "📤 Versions to build: $VERSIONS_TO_BUILD" >&2
 else

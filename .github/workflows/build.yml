@@ -45,13 +45,13 @@ jobs:
           if [ -n "${{ github.event.inputs.version }}" ]; then
             # Manual run with specific version
             echo "🎯 Manual build requested for version: ${{ github.event.inputs.version }}"
-            VERSIONS='["${{ github.event.inputs.version }}"]'
+            VERSIONS=$(echo '["${{ github.event.inputs.version }}"]' | jq -c .)
           else
             # Auto-detect new versions
             VERSIONS=$(.github/scripts/detect-versions.sh)
           fi
           
-          echo "versions=$VERSIONS" >> $GITHUB_OUTPUT
+          echo "versions=${VERSIONS}" >> $GITHUB_OUTPUT
           
           if [ "$VERSIONS" = "[]" ] || [ "$VERSIONS" = "" ]; then
             echo "has_versions=false" >> $GITHUB_OUTPUT
