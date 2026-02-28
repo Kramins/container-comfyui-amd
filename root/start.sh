@@ -1,5 +1,5 @@
 #!/bin/bash
-ROCM_VERSION="6.4"  # Set your ROCm version here
+ROCM_VERSION="7.1"  # Set your ROCm version here
 VENV_PATH="/data/venv"
 PIP_BIN="$VENV_PATH/bin/pip"
 
