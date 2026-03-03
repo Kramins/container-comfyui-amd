@@ -1,0 +1,9 @@
+{
+    "chat.tools.terminal.autoApprove": {
+        "/^bash -n debug-zluda\\.sh && echo \"syntax OK\"$/": {
+            "approve": true,
+            "matchCommandLine": true
+        },
+        "docker run": true
+    }
+}

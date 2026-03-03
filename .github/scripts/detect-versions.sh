@@ -4,7 +4,7 @@ set -euo pipefail
 # Configuration
 GITHUB_REPO="Comfy-Org/ComfyUI"
 GHCR_REGISTRY="ghcr.io/kramins/comfyui-amd"
-MAX_INITIAL_VERSIONS=5
+MAX_INITIAL_VERSIONS=2
 
 echo "🔍 Detecting ComfyUI versions to build..." >&2
 
@@ -49,9 +49,10 @@ if [ "$FIRST_RUN" = true ]; then
         VERSIONS_TO_BUILD="$VERSIONS_TO_BUILD $version"
     done
 else
-    # Subsequent runs: build only new releases
-    echo "🔄 Checking for new releases..." >&2
-    for version in $AVAILABLE_RELEASES; do
+    # Subsequent runs: build only new releases (capped to last 2)
+    echo "🔄 Checking for new releases (last $MAX_INITIAL_VERSIONS)..." >&2
+    RECENT_RELEASES=$(echo "$AVAILABLE_RELEASES" | head -n "$MAX_INITIAL_VERSIONS")
+    for version in $RECENT_RELEASES; do
         if ! echo "$EXISTING_TAGS" | grep -q "^${version}$"; then
             echo "🆕 New version found: $version" >&2
             VERSIONS_TO_BUILD="$VERSIONS_TO_BUILD $version"
