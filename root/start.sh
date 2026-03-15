@@ -77,6 +77,8 @@ done
 
 # Start ComfyUI
 echo "[INFO] Starting ComfyUI..."
+echo "[INFO] Log level: ${COMFYUI_LOG_LEVEL:-WARNING}"
 "$VENV_PATH/bin/python" /app/main.py \
     --listen 0.0.0.0 \
     --base-directory /data \
+    --verbose "${COMFYUI_LOG_LEVEL:-WARNING}" \
