@@ -34,12 +34,17 @@ if [ ! -f "$VENV_PATH/bin/python" ]; then
     python3 -m venv "$VENV_PATH"
 fi
 
-for folder in models user output input custom_nodes temp cache/huggingface; do
+for folder in models user output input custom_nodes temp miopen; do
     if [ ! -d "/data/$folder" ]; then
         echo "[INFO] Creating /data/$folder..."
         mkdir -p "/data/$folder"
     fi
 done
+
+# Point MIOpen's kernel tuning cache to the persistent data volume.
+# Without this MIOpen cannot write its SQLite DB and crashes.
+export MIOPEN_USER_DB_PATH="/data/miopen"
+export MIOPEN_SYSTEM_DB_PATH="/data/miopen"
 
 # Install requirements
 
@@ -152,6 +157,26 @@ done
 # Start ComfyUI
 echo "[INFO] Starting ComfyUI..."
 # shellcheck disable=SC2086
+echo ""
+echo "╔══════════════════════════════════════════════════════════╗"
+echo "║              ComfyUI AMD — Launch Settings               ║"
+echo "╚══════════════════════════════════════════════════════════╝"
+echo ""
+echo "  GPU arch            : ${GFX_ARCH:-unknown}"
+echo "  ComfyUI version     : ${COMFYUI_VERSION:-unknown}"
+echo "  ROCm torch index    : rocm${ROCM_VERSION}"
+echo "  HSA_OVERRIDE_GFX    : ${HSA_OVERRIDE_GFX_VERSION:-not set}"
+echo "  HIPBLASLT           : ${TORCH_BLAS_PREFER_HIPBLASLT:-not set}"
+echo "  HIP_ALLOC_CONF      : ${PYTORCH_HIP_ALLOC_CONF:-not set}"
+echo "  MIOPEN_USER_DB_PATH : ${MIOPEN_USER_DB_PATH:-not set}"
+echo "  Extra launch args   : ${COMFYUI_EXTRA_ARGS:-(none)}"
+echo "  Venv                : ${VENV_PATH}"
+echo "  Data dir            : /data"
+echo ""
+echo "  Launching in 5 seconds... (Ctrl-C to abort)"
+echo ""
+sleep 5
+
 "$VENV_PATH/bin/python" /app/main.py \
     --listen 0.0.0.0 \
     --base-directory /data \
