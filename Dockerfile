@@ -12,7 +12,10 @@ RUN apt update && apt install -y \
     python3 python3-pip python3.12-venv \
     git rsync \
     sqlite3 libsqlite3-dev \
-    && rm -rf /var/lib/apt/lists/*
+    libdrm-amdgpu1 \
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /opt/amdgpu/share/libdrm \
+    && ln -sf /usr/share/libdrm/amdgpu.ids /opt/amdgpu/share/libdrm/amdgpu.ids
 
 # Create user and group
 RUN if ! getent group $group_id; then groupadd -g $group_id user; fi && \
@@ -49,6 +52,10 @@ ADD root/* /
 EXPOSE 8188
 SHELL ["/bin/bash", "-c"]
 ENV PYTHONUNBUFFERED=1
+# Redirect HuggingFace cache to the persistent data volume
+ENV HF_HUB_CACHE=/data/cache/huggingface
+# AMD ROCm performance tuning
+ENV PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.9,max_split_size_mb:512
 
 # Use the startup script to handle all setup and runtime
 CMD ["/bin/bash", "/start.sh"]

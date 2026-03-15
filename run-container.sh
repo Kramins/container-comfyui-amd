@@ -6,8 +6,17 @@
 
 VERSION="${1:-latest}"
 CONTAINER_NAME="comfyui"
+
+# Load .env file if present (values set there override defaults below)
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "${SCRIPT_DIR}/.env" ]; then
+    set -o allexport
+    source "${SCRIPT_DIR}/.env"
+    set +o allexport
+fi
+
 IMAGE="ghcr.io/kramins/comfyui-amd:$VERSION"
-COMFYUI_DATA="$HOME/comfyui"
+COMFYUI_DATA="${COMFYUI_DATA:-$HOME/comfyui}"
 
 echo "🚀 Starting ComfyUI container"
 echo "   Version: $VERSION"
@@ -16,7 +25,7 @@ echo "   Data directory: $COMFYUI_DATA"
 echo ""
 
 # Create data directories if they don't exist
-mkdir -p "$COMFYUI_DATA"/{models,custom_nodes,output,user,input,temp}
+mkdir -p "$COMFYUI_DATA"/{models,custom_nodes,output,user,input,temp,cache/huggingface}
 
 # Stop and remove the container if it exists
 if [ "$(docker ps -q -f name=$CONTAINER_NAME)" ]; then
@@ -36,5 +45,7 @@ docker run --rm -it --privileged \
     -v /dev:/dev \
     -p 8188:8188 \
     -v "$COMFYUI_DATA":/data/ \
+    ${HSA_OVERRIDE_GFX_VERSION:+-e "HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION}"} \
+    ${PYTORCH_HIP_ALLOC_CONF:+-e "PYTORCH_HIP_ALLOC_CONF=${PYTORCH_HIP_ALLOC_CONF}"} \
     --name $CONTAINER_NAME \
     $IMAGE
