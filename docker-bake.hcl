@@ -40,10 +40,10 @@ target "comfyui-amd" {
   no-cache = false
   tags = concat(
     [
-      "${DOCKER_REPO}/comfyui-amd:${version}",
+      "${DOCKER_REPO}:${version}",
     ],
     # Add 'latest' tag if ADD_LATEST_TAG is true and this is not the git version
-    ADD_LATEST_TAG == "true" && version != "git" ? ["${DOCKER_REPO}/comfyui-amd:latest"] : []
+    ADD_LATEST_TAG == "true" && version != "git" ? ["${DOCKER_REPO}:latest"] : []
   )
   labels = {
     "org.opencontainers.image.title" = "ComfyUI AMD"

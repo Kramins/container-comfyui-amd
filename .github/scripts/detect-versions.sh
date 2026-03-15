@@ -21,10 +21,13 @@ fi
 
 echo "📋 Found releases: $(echo "$AVAILABLE_RELEASES" | tr '\n' ', ' | sed 's/,$//')" >&2
 
-# Fetch existing tags from GHCR
+# Fetch existing tags from GHCR via GitHub Packages API (requires auth)
 echo "🏷️  Checking existing tags in GHCR..." >&2
-EXISTING_TAGS=$(curl -sL "https://ghcr.io/v2/kramins/comfyui-amd/tags/list" 2>/dev/null | \
-    jq -r '.tags[]? // empty' | \
+EXISTING_TAGS=$(curl -sL \
+    -H "Authorization: token ${GITHUB_TOKEN:-}" \
+    -H "Accept: application/vnd.github.v3+json" \
+    "https://api.github.com/users/kramins/packages/container/comfyui-amd/versions?per_page=100" 2>/dev/null | \
+    jq -r '.[].metadata.container.tags[]? // empty' | \
     grep -v "^latest$" | \
     grep -v "^git" | \
     sort -V -r || echo "")

@@ -20,7 +20,7 @@ fi
 
 echo "🔨 Building ComfyUI AMD container"
 echo "   Version: $VERSION"
-echo "   Registry: $DOCKER_REPO/comfyui-amd"
+echo "   Registry: $DOCKER_REPO"
 echo ""
 
 # Export environment variables for docker bake
@@ -36,7 +36,7 @@ docker buildx bake \
 
 echo ""
 echo "✅ Build completed successfully!"
-echo "   Image: $DOCKER_REPO/comfyui-amd:$VERSION"
+echo "   Image: $DOCKER_REPO:$VERSION"
 
 if [ -z "$PUSH_FLAG" ]; then
     echo ""

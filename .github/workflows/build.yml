@@ -30,6 +30,9 @@ jobs:
   detect-versions:
     name: Detect versions to build
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: read
     outputs:
       versions: ${{ steps.detect.outputs.versions }}
       has_versions: ${{ steps.detect.outputs.has_versions }}
@@ -39,6 +42,8 @@ jobs:
 
       - name: Detect versions
         id: detect
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           chmod +x .github/scripts/detect-versions.sh
           
