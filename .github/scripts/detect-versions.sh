@@ -52,19 +52,26 @@ if [ "$FIRST_RUN" = true ]; then
         VERSIONS_TO_BUILD="$VERSIONS_TO_BUILD $version"
     done
 else
-    # Subsequent runs: build only new releases
+    # Subsequent runs: build only releases newer than what's already built.
+    # AVAILABLE_RELEASES is sorted newest-first, so stop at the first version
+    # that already exists in the registry.
     echo "🔄 Checking for new releases..." >&2
     for version in $AVAILABLE_RELEASES; do
-        if ! echo "$EXISTING_TAGS" | grep -q "^${version}$"; then
-            echo "🆕 New version found: $version" >&2
-            VERSIONS_TO_BUILD="$VERSIONS_TO_BUILD $version"
+        if echo "$EXISTING_TAGS" | grep -q "^${version}$"; then
+            echo "✅ Reached already-built version $version, stopping" >&2
+            break
         fi
+        echo "🆕 New version found: $version" >&2
+        VERSIONS_TO_BUILD="$VERSIONS_TO_BUILD $version"
     done
-    
+
     if [ -z "$VERSIONS_TO_BUILD" ]; then
         echo "✅ No new versions to build" >&2
     fi
 fi
+
+# Strip any leading whitespace (avoids empty element in JSON array)
+VERSIONS_TO_BUILD="${VERSIONS_TO_BUILD# }"
 
 # Output as JSON array for GitHub Actions matrix
 if [ -n "$VERSIONS_TO_BUILD" ]; then
