@@ -3,7 +3,7 @@ variable "COMFYUI_VERSIONS" {
 }
 
 variable "DOCKER_REPO" {
-  default = "ghcr.io/kramins"
+  default = "ghcr.io/kramins/comfyui-amd"
 }
 
 variable "ADD_LATEST_TAG" {

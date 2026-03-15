@@ -10,7 +10,7 @@ set -e
 
 VERSION=${1:-git}
 PUSH_FLAG=""
-DOCKER_REPO=${DOCKER_REPO:-"ghcr.io/kramins"}
+DOCKER_REPO=${DOCKER_REPO:-"ghcr.io/kramins/comfyui-amd"}
 
 # Check if --push flag is provided
 if [[ "$*" == *"--push"* ]]; then
