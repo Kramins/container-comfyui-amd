@@ -60,7 +60,7 @@ if [ ! -f "${COMFYUI_DATA}/venv/bin/python" ]; then
 fi
 
 # ── install / update optimisation packages into the existing venv ───────────
-ROCM_VER="${ROCM_VERSION:-7.1}"
+ROCM_VER="${ROCM_VERSION:-6.4}"
 HSA_GFX="${HSA_OVERRIDE_GFX_VERSION:-}"
 echo "  Installing optimisation packages into venv (rocm${ROCM_VER})..."
 docker run --rm --privileged \
@@ -94,6 +94,7 @@ docker run --rm -it --privileged \
     -v "${SCRIPT_DIR}/benchmark/benchmark.py:/benchmark/benchmark.py:ro" \
     -v "${RESULTS_DIR}:/data/output" \
     -e "BENCHMARK_OUTPUT=/data/output/${RESULT_FILE}" \
+    -e "VENV_PATH=/data/venv" \
     -e "PYTORCH_HIP_ALLOC_CONF=garbage_collection_threshold:0.9,max_split_size_mb:512" \
     ${HSA_GFX:+-e "HSA_OVERRIDE_GFX_VERSION=${HSA_GFX}"} \
     --name comfyui-benchmark \
@@ -113,16 +114,17 @@ if [ "${JSON_COUNT}" -gt 1 ]; then
     echo "──────────────────────────────────────────────────────────"
     echo "  Historical results (newest first):"
     echo ""
-    printf "  %-24s  %8s  %8s  %8s  %10s\n" \
-        "Timestamp" "FP16 TF" "Conv ms" "SDPA ms" "BW GB/s"
+    printf "  %-24s  %8s  %8s  %8s  %10s  %10s\n" \
+        "Timestamp" "FP16 TF" "Conv ms" "SDPA ms" "BW GB/s" "steps/s"
     echo "  ────────────────────────────────────────────────────────"
     find "${RESULTS_DIR}" -name "benchmark_*.json" | sort -r | while read -r f; do
         ts=$(basename "$f" .json | sed 's/benchmark_//')
         fp16=$(python3 -c "import json; d=json.load(open('$f')); print(d.get('matmul_fp16_tflops','?'))" 2>/dev/null)
         conv=$(python3 -c "import json; d=json.load(open('$f')); print(d.get('conv2d_ms','?'))" 2>/dev/null)
         sdpa=$(python3 -c "import json; d=json.load(open('$f')); print(d.get('sdpa_native_ms','?'))" 2>/dev/null)
-        bw=$(python3  -c "import json; d=json.load(open('$f')); print(d.get('memory_bandwidth_gbs','?'))" 2>/dev/null)
-        printf "  %-24s  %8s  %8s  %8s  %10s\n" "$ts" "$fp16" "$conv" "$sdpa" "$bw"
+        bw=$(python3   -c "import json; d=json.load(open('$f')); print(d.get('memory_bandwidth_gbs','?'))" 2>/dev/null)
+        sps=$(python3  -c "import json; d=json.load(open('$f')); g=d.get('comfyui_gen',{}); print(g.get('steps_per_sec','—') if isinstance(g,dict) else '—')" 2>/dev/null)
+        printf "  %-24s  %8s  %8s  %8s  %10s  %10s\n" "$ts" "$fp16" "$conv" "$sdpa" "$bw" "$sps"
     done
     echo ""
 fi

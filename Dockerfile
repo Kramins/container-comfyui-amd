@@ -13,6 +13,7 @@ RUN apt update && apt install -y \
     git rsync \
     sqlite3 libsqlite3-dev \
     libdrm-amdgpu1 \
+    miopen-hip \
     && rm -rf /var/lib/apt/lists/* \
     && mkdir -p /opt/amdgpu/share/libdrm \
     && ln -sf /usr/share/libdrm/amdgpu.ids /opt/amdgpu/share/libdrm/amdgpu.ids

@@ -45,7 +45,5 @@ docker run --rm -it --privileged \
     -v /dev:/dev \
     -p 8188:8188 \
     -v "$COMFYUI_DATA":/data/ \
-    ${HSA_OVERRIDE_GFX_VERSION:+-e "HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION}"} \
-    ${PYTORCH_HIP_ALLOC_CONF:+-e "PYTORCH_HIP_ALLOC_CONF=${PYTORCH_HIP_ALLOC_CONF}"} \
     --name $CONTAINER_NAME \
     $IMAGE

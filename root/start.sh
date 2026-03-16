@@ -1,16 +1,42 @@
 #!/bin/bash
-ROCM_VERSION="7.1"  # Set your ROCm version here
+# =============================================================================
+# Configuration
+# =============================================================================
+
+ROCM_VERSION="7.1"
 VENV_PATH="/data/venv"
 PIP_BIN="$VENV_PATH/bin/pip"
 
+# MIOpen kernel database — pre-compiled kernels to avoid SearchImpl at runtime.
+# Downloaded once to /data/miopen-kdb and reused across container restarts.
+KDB_ROCM_VER="7.1.1"
+KDB_PKG_VER="3.5.1.70101-38~24.04"
+KDB_DIR="/data/miopen-kdb"
+
+# Custom nodes: map of repo URL → directory name under /data/custom_nodes
+declare -A CUSTOM_NODES=(
+    ["https://github.com/ltdrdata/ComfyUI-Manager"]="comfyui-manager"
+)
+
+# =============================================================================
+# MIOpen / ROCm Environment
+# =============================================================================
+
+export MIOPEN_BACKEND=MLIR
+export MIOPEN_FIND_MODE=2        # check DB + search if missing
+export MIOPEN_USER_DB_PATH=/tmp/miopen
+export MIOPEN_ENABLE_CACHE=1
+export PYTORCH_HIP_ALLOC_CONF=max_split_size_mb:512
+
+# =============================================================================
+# ComfyUI Source
+# =============================================================================
 
 echo "[INFO] Starting ComfyUI setup..."
 
-# Handle ComfyUI source based on version
 if [ "${COMFYUI_VERSION}" = "git" ]; then
-    # Git version: clone or update at runtime
     if [ -d /app/.git ]; then
-        echo "[INFO] ComfyUI repository already exists. Pulling latest changes..."
+        echo "[INFO] Updating ComfyUI repository..."
         cd /app || exit 1
         git pull origin main
     else
@@ -18,7 +44,6 @@ if [ "${COMFYUI_VERSION}" = "git" ]; then
         git clone --depth 1 https://github.com/Comfy-Org/ComfyUI.git /app/
     fi
 else
-    # Release version: should already be in /app from build
     echo "[INFO] Using ComfyUI release version: ${COMFYUI_VERSION}"
     if [ ! -f /app/main.py ]; then
         echo "[ERROR] ComfyUI release files not found in /app. Build may have failed."
@@ -26,92 +51,68 @@ else
     fi
 fi
 
+# =============================================================================
+# Virtual Environment
+# =============================================================================
 
-# Create the virtual environment if it doesn't exist or is incomplete
 if [ ! -f "$VENV_PATH/bin/python" ]; then
     echo "[INFO] Creating virtual environment..."
     mkdir -p "$VENV_PATH"
     python3 -m venv "$VENV_PATH"
 fi
 
-for folder in models user output input custom_nodes temp miopen; do
+# =============================================================================
+# Data Directories
+# =============================================================================
+
+for folder in models user output input custom_nodes temp; do
     if [ ! -d "/data/$folder" ]; then
         echo "[INFO] Creating /data/$folder..."
         mkdir -p "/data/$folder"
     fi
 done
 
-# Point MIOpen's kernel tuning cache to the persistent data volume.
-# Without this MIOpen cannot write its SQLite DB and crashes.
-export MIOPEN_USER_DB_PATH="/data/miopen"
-export MIOPEN_SYSTEM_DB_PATH="/data/miopen"
+# =============================================================================
+# GPU Architecture Detection
+# =============================================================================
 
-# Install requirements
-
-# Install ROCM Torch Requirements
-echo "[INFO] Installing ROCm Torch requirements..."
-"$PIP_BIN" install torch torchvision torchaudio --index-url "https://download.pytorch.org/whl/rocm${ROCM_VERSION}"
-
-
-
-echo "[INFO] Installing ComfyUI requirements..."
-requirements_file="/app/requirements.txt"
-if [ ! -f "$requirements_file" ]; then
-    echo "[ERROR] Requirements file $requirements_file not found."
-    exit 1
-fi
-"$PIP_BIN" install -r "$requirements_file"
-
-# Detect GPU architecture for conditional package installs and tuning
 GFX_ARCH=""
 if command -v rocminfo &>/dev/null; then
     GFX_ARCH=$(rocminfo 2>/dev/null | grep "Name:" | grep -o "gfx[0-9]*" | head -1)
 fi
 echo "[INFO] Detected GPU arch: ${GFX_ARCH:-unknown}"
 
-# ── Per-arch environment tuning ───────────────────────────────────────────────
-# Only set HSA_OVERRIDE_GFX_VERSION if it wasn't already provided externally.
-# This lets the .env / docker run -e value always win.
+# Per-arch tuning: HSA override version, hipBLASLt, and extra ComfyUI launch args.
+# HSA_OVERRIDE_GFX_VERSION respects any value already present in the environment
+# (e.g. from .env / docker run -e) and only falls back to the arch default.
 COMFYUI_EXTRA_ARGS=""
 
 case "${GFX_ARCH}" in
-    # ── RDNA1 (RX 5000) ──────────────────────────────────────────────────────
     gfx1010|gfx1011|gfx1012)
         echo "[INFO] GPU family: RDNA1"
         export HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-10.1.0}"
-        # No hipBLASLt, no xformers wheel support
         ;;
-
-    # ── RDNA2 (RX 6000) ──────────────────────────────────────────────────────
     gfx1030|gfx1031|gfx1032|gfx1034|gfx1035|gfx1036)
-        echo "[INFO] GPU family: RDNA2 — using torch.compile for fast attention"
+        echo "[INFO] GPU family: RDNA2"
         export HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-10.3.0}"
-        # xformers pre-built wheel crashes on RDNA2; torch.compile via --fast covers it
         COMFYUI_EXTRA_ARGS="--use-pytorch-cross-attention"
         ;;
-
-    # ── RDNA3 (RX 7000) ──────────────────────────────────────────────────────
     gfx1100|gfx1101|gfx1102)
         echo "[INFO] GPU family: RDNA3 — enabling hipBLASLt"
         export HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-11.0.0}"
         export TORCH_BLAS_PREFER_HIPBLASLT=1
         COMFYUI_EXTRA_ARGS="--use-pytorch-cross-attention"
         ;;
-
-    # ── RDNA3.5 (RX 8000) ────────────────────────────────────────────────────
     gfx1150|gfx1151)
         echo "[INFO] GPU family: RDNA3.5 — enabling hipBLASLt"
         export HSA_OVERRIDE_GFX_VERSION="${HSA_OVERRIDE_GFX_VERSION:-11.5.0}"
         export TORCH_BLAS_PREFER_HIPBLASLT=1
         COMFYUI_EXTRA_ARGS="--use-pytorch-cross-attention"
         ;;
-
-    # ── CDNA (Instinct MI series) ─────────────────────────────────────────────
     gfx908|gfx90a|gfx940|gfx941|gfx942)
         echo "[INFO] GPU family: CDNA (Instinct) — enabling hipBLASLt"
         export TORCH_BLAS_PREFER_HIPBLASLT=1
         ;;
-
     *)
         echo "[INFO] GPU arch ${GFX_ARCH:-unknown} — using default settings"
         ;;
@@ -120,43 +121,80 @@ esac
 echo "[INFO] HSA_OVERRIDE_GFX_VERSION=${HSA_OVERRIDE_GFX_VERSION:-not set}"
 echo "[INFO] TORCH_BLAS_PREFER_HIPBLASLT=${TORCH_BLAS_PREFER_HIPBLASLT:-not set}"
 
-# Install AMD performance optimisation packages
+# =============================================================================
+# Package Installation
+# =============================================================================
+
+echo "[INFO] Installing ROCm PyTorch..."
+"$PIP_BIN" install torch torchvision torchaudio \
+    --index-url "https://download.pytorch.org/whl/rocm${ROCM_VERSION}"
+
+echo "[INFO] Installing ComfyUI requirements..."
+if [ ! -f /app/requirements.txt ]; then
+    echo "[ERROR] /app/requirements.txt not found."
+    exit 1
+fi
+"$PIP_BIN" install -r /app/requirements.txt
+
 echo "[INFO] Installing AMD performance packages..."
 # xformers pre-built wheels target gfx908/gfx90a/gfx1100+.
 # RDNA1/RDNA2 (gfx1010–gfx1036) crash with the pre-built wheel — skip them.
 case "${GFX_ARCH}" in
     gfx101*|gfx103*)
         echo "[INFO] Skipping xformers on ${GFX_ARCH} (RDNA1/RDNA2): pre-built wheel unsupported."
-        echo "[INFO]   To use xformers, build from source: PYTORCH_ROCM_ARCH=${GFX_ARCH} pip install xformers --no-binary xformers"
         ;;
     *)
-        "$PIP_BIN" install xformers --index-url "https://download.pytorch.org/whl/rocm${ROCM_VERSION}" \
+        "$PIP_BIN" install xformers \
+            --index-url "https://download.pytorch.org/whl/rocm${ROCM_VERSION}" \
             || echo "[WARN] xformers install failed, continuing without it"
         ;;
 esac
 "$PIP_BIN" install onnxruntime-rocm bitsandbytes torchao
 
-# Clone custom nodes and install requirements if present
-CUSTOM_NODES_PATH="/data/custom_nodes"
-declare -A node_mapping
-node_mapping=(
-    ["https://github.com/ltdrdata/ComfyUI-Manager"]="comfyui-manager"
-)
-for repo in "${!node_mapping[@]}"; do
-    directory_name="${node_mapping[$repo]}"
-    directory="$CUSTOM_NODES_PATH/$directory_name"
-    echo "[INFO] Preparing to clone custom node: $repo -> $directory"
-    git clone --depth 1 "$repo" "$directory"
-    requirements_file="$directory/requirements.txt"
-    if [ -f "$requirements_file" ]; then
-        echo "[INFO] Installing requirements for custom node: $directory_name"
-        "$PIP_BIN" install -r "$requirements_file"
+# =============================================================================
+# MIOpen Kernel Database (kdb)
+# =============================================================================
+
+if [ -n "${GFX_ARCH}" ]; then
+    KDB_FILE="${KDB_DIR}/${GFX_ARCH}.kdb"
+    if [ ! -f "${KDB_FILE}" ]; then
+        echo "[INFO] Downloading MIOpen kdb for ${GFX_ARCH} (~745 MB, once only)..."
+        mkdir -p "${KDB_DIR}"
+        KDB_DEB="miopen-hip-${GFX_ARCH}kdb_${KDB_PKG_VER}_amd64.deb"
+        KDB_URL="https://repo.radeon.com/rocm/apt/${KDB_ROCM_VER}/pool/main/m/miopen-hip-${GFX_ARCH}kdb/${KDB_DEB}"
+        if curl -fL "${KDB_URL}" -o "/tmp/${KDB_DEB}" 2>&1; then
+            dpkg-deb -x "/tmp/${KDB_DEB}" /tmp/kdb-extract
+            find /tmp/kdb-extract -name "*.kdb" -exec cp {} "${KDB_FILE}" \;
+            rm -rf "/tmp/${KDB_DEB}" /tmp/kdb-extract
+            echo "[INFO] MIOpen kdb saved to ${KDB_FILE}."
+        else
+            echo "[WARN] MIOpen kdb not available for ${GFX_ARCH} — SearchImpl fallback active."
+        fi
+    else
+        echo "[INFO] MIOpen kdb already present: ${KDB_FILE}"
+    fi
+    export MIOPEN_SYSTEM_DB_PATH="${KDB_DIR}"
+fi
+
+# =============================================================================
+# Custom Nodes
+# =============================================================================
+
+for repo in "${!CUSTOM_NODES[@]}"; do
+    dir_name="${CUSTOM_NODES[$repo]}"
+    dir="/data/custom_nodes/${dir_name}"
+    echo "[INFO] Installing custom node: ${dir_name}"
+    git clone --depth 1 "${repo}" "${dir}"
+    if [ -f "${dir}/requirements.txt" ]; then
+        echo "[INFO] Installing requirements for: ${dir_name}"
+        "$PIP_BIN" install -r "${dir}/requirements.txt"
     fi
 done
 
-# Start ComfyUI
-echo "[INFO] Starting ComfyUI..."
-# shellcheck disable=SC2086
+# =============================================================================
+# Launch ComfyUI
+# =============================================================================
+
 echo ""
 echo "╔══════════════════════════════════════════════════════════╗"
 echo "║              ComfyUI AMD — Launch Settings               ║"
@@ -168,7 +206,8 @@ echo "  ROCm torch index    : rocm${ROCM_VERSION}"
 echo "  HSA_OVERRIDE_GFX    : ${HSA_OVERRIDE_GFX_VERSION:-not set}"
 echo "  HIPBLASLT           : ${TORCH_BLAS_PREFER_HIPBLASLT:-not set}"
 echo "  HIP_ALLOC_CONF      : ${PYTORCH_HIP_ALLOC_CONF:-not set}"
-echo "  MIOPEN_USER_DB_PATH : ${MIOPEN_USER_DB_PATH:-not set}"
+echo "  MIOPEN_FIND_MODE    : ${MIOPEN_FIND_MODE:-not set}"
+echo "  MIOPEN_SYSTEM_DB    : ${MIOPEN_SYSTEM_DB_PATH:-not set}"
 echo "  Extra launch args   : ${COMFYUI_EXTRA_ARGS:-(none)}"
 echo "  Venv                : ${VENV_PATH}"
 echo "  Data dir            : /data"
@@ -177,8 +216,8 @@ echo "  Launching in 5 seconds... (Ctrl-C to abort)"
 echo ""
 sleep 5
 
+# shellcheck disable=SC2086
 "$VENV_PATH/bin/python" /app/main.py \
     --listen 0.0.0.0 \
     --base-directory /data \
-    --fast \
     ${COMFYUI_EXTRA_ARGS}

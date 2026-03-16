@@ -1,6 +1,8 @@
 {
     "chat.tools.terminal.autoApprove": {
         "./run-benchmark.sh": true,
-        "./build-container.sh": true
+        "./build-container.sh": true,
+        "docker run": true,
+        "docker exec": true
     }
 }

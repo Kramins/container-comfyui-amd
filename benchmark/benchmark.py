@@ -22,6 +22,7 @@ import subprocess
 
 WARMUP_ITERS = 5
 BENCH_ITERS  = 25
+VENV_PATH    = os.environ.get("VENV_PATH", "/data/venv")
 
 # ─────────────────────── helpers ────────────────────────────────────────────
 
@@ -376,6 +377,257 @@ row("Total",     f"{vram_total:.2f} GB")
 results["vram_allocated_gb"] = round(alloc_gb, 2)
 results["vram_reserved_gb"]  = round(resv_gb, 2)
 
+# ─────────────────────── real-world ComfyUI generation ───────────────────────
+
+header("Real-World ComfyUI Generation")
+
+import glob
+import signal
+import urllib.request
+import urllib.error
+
+_BENCH_PORT = 8289   # use a non-default port so it never clashes with a live instance
+_STEPS      = 20
+_WIDTH      = 512
+_HEIGHT     = 512
+_PROMPT     = "a scenic mountain landscape at sunset, photorealistic, high quality"
+_NEGATIVE   = "blurry, low quality, ugly, watermark"
+
+def _find_checkpoint() -> str | None:
+    """Return the first .safetensors or .ckpt found in /data/models/checkpoints/."""
+    for pattern in ("*.safetensors", "*.ckpt"):
+        hits = sorted(glob.glob(f"/data/models/checkpoints/{pattern}"))
+        # Prefer smaller / simpler models for a quick benchmark (skip huge fp8 LTX etc.)
+        for h in hits:
+            name = os.path.basename(h)
+            size_gb = os.path.getsize(h) / 1024**3
+            # Use the first model that looks like SD1.5 or SDXL (< 10 GB)
+            if size_gb < 10:
+                return name
+        if hits:
+            return os.path.basename(hits[0])
+    return None
+
+
+def _wait_for_comfyui(port: int, proc: subprocess.Popen, timeout: int = 180) -> bool:
+    """Poll /system_stats until ready or timeout. Drain+print stdout to see what ComfyUI says."""
+    import select
+    url      = f"http://127.0.0.1:{port}/system_stats"
+    deadline = time.monotonic() + timeout
+    log_buf  = []
+    while time.monotonic() < deadline:
+        # drain stdout so the pipe never blocks the child process
+        if proc.stdout:
+            while True:
+                ready, _, _ = select.select([proc.stdout], [], [], 0)
+                if not ready:
+                    break
+                chunk = os.read(proc.stdout.fileno(), 8192)
+                if not chunk:
+                    break
+                text = chunk.decode(errors="replace")
+                log_buf.append(text)
+                for line in text.splitlines():
+                    print(f"  [ComfyUI] {line}", flush=True)
+        # Bail early if server died
+        if proc.poll() is not None:
+            return False, log_buf
+        try:
+            urllib.request.urlopen(url, timeout=2)
+            return True, log_buf
+        except Exception:
+            time.sleep(1)
+    return False, log_buf
+
+
+def _build_workflow(ckpt_name: str, steps: int, width: int, height: int,
+                    prompt: str, negative: str, seed: int = 42) -> dict:
+    return {
+        "4":  {"class_type": "CheckpointLoaderSimple",
+               "inputs":     {"ckpt_name": ckpt_name}},
+        "5":  {"class_type": "EmptyLatentImage",
+               "inputs":     {"width": width, "height": height, "batch_size": 1}},
+        "6":  {"class_type": "CLIPTextEncode",
+               "inputs":     {"text": prompt,   "clip": ["4", 1]}},
+        "7":  {"class_type": "CLIPTextEncode",
+               "inputs":     {"text": negative, "clip": ["4", 1]}},
+        "3":  {"class_type": "KSampler",
+               "inputs":     {"seed": seed, "steps": steps, "cfg": 7.0,
+                              "sampler_name": "euler", "scheduler": "normal",
+                              "denoise": 1.0,
+                              "model":         ["4", 0],
+                              "positive":      ["6", 0],
+                              "negative":      ["7", 0],
+                              "latent_image":  ["5", 0]}},
+        "8":  {"class_type": "VAEDecode",
+               "inputs":     {"samples": ["3", 0], "vae": ["4", 2]}},
+        "9":  {"class_type": "SaveImage",
+               "inputs":     {"filename_prefix": "benchmark", "images": ["8", 0]}},
+    }
+
+
+ckpt = _find_checkpoint()
+if ckpt is None:
+    row("Checkpoint", "none found in /data/models/checkpoints — skipping")
+    results["comfyui_gen"] = "no_model"
+else:
+    # Locate ComfyUI source — it's baked into /app for release builds;
+    # for git builds it gets cloned at runtime by start.sh.
+    # If /app/main.py is missing (benchmark container, git build), clone it.
+    _app_path = "/app"
+    if not os.path.exists(f"{_app_path}/main.py"):
+        _clone_path = "/tmp/comfyui-bench"
+        if not os.path.exists(f"{_clone_path}/main.py"):
+            row("", "Cloning ComfyUI for generation test...")
+            subprocess.run(
+                ["git", "clone", "--depth", "1",
+                 "https://github.com/Comfy-Org/ComfyUI.git", _clone_path],
+                check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+        _app_path = _clone_path
+
+    row("Checkpoint", ckpt)
+    row("Resolution", f"{_WIDTH}×{_HEIGHT},  {_STEPS} steps")
+    row("", "Starting ComfyUI server on port 8289...")
+
+    # For RDNA1/RDNA2 xformers pre-built wheel segfaults — force pytorch attention.
+    # Detect from HSA_OVERRIDE_GFX_VERSION or gfx_version (already captured above).
+    _gfx = gfx_version or os.environ.get("HSA_OVERRIDE_GFX_VERSION", "")
+    _rdna12 = any(_gfx.startswith(p) for p in ("gfx101", "gfx103", "10.1", "10.3"))
+    _attn_flag = ["--use-pytorch-cross-attention"] if _rdna12 else []
+
+    def _drain_comfyui(proc: subprocess.Popen, label: str = "[ComfyUI]") -> None:
+        """Non-blocking drain of ComfyUI stdout; print each line prefixed."""
+        import select
+        if proc.stdout is None:
+            return
+        while True:
+            ready, _, _ = select.select([proc.stdout], [], [], 0)
+            if not ready:
+                break
+            chunk = os.read(proc.stdout.fileno(), 8192)
+            if not chunk:
+                break
+            for line in chunk.decode(errors="replace").splitlines():
+                print(f"  {label} {line}", flush=True)
+
+    _comfyui_proc = None
+    try:
+        _env = os.environ.copy()
+        _env.setdefault("MIOPEN_USER_DB_PATH",  "/data/miopen")
+        _env.setdefault("MIOPEN_DISABLE_CACHE", "0")
+
+        _cmd = (
+            [f"{VENV_PATH}/bin/python", f"{_app_path}/main.py",
+             "--listen", "127.0.0.1",
+             "--port",   str(_BENCH_PORT),
+             "--base-directory", "/data",
+             "--fast",
+             "--disable-auto-launch"]
+            + _attn_flag
+        )
+        row("", f"ComfyUI cmd: {' '.join(_cmd[-4:])}")
+        _comfyui_proc = subprocess.Popen(
+            _cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            env=_env,
+        )
+
+        ready, _log_buf = _wait_for_comfyui(_BENCH_PORT, _comfyui_proc, timeout=180)
+        if not ready:
+            _drain_comfyui(_comfyui_proc)
+            _tail = "".join(_log_buf)[-4000:]
+            raise RuntimeError(
+                f"ComfyUI did not become ready within 180 s.\nLast output:\n{_tail}"
+            )
+
+        row("", "Server ready — submitting workflow...")
+
+        # ── submit prompt ──────────────────────────────────────────────
+        workflow  = _build_workflow(ckpt, _STEPS, _WIDTH, _HEIGHT, _PROMPT, _NEGATIVE)
+        payload   = json.dumps({"prompt": workflow}).encode()
+        req       = urllib.request.Request(
+                        f"http://127.0.0.1:{_BENCH_PORT}/prompt",
+                        data=payload,
+                        headers={"Content-Type": "application/json"},
+                        method="POST")
+        resp      = urllib.request.urlopen(req, timeout=30)
+        prompt_id = json.loads(resp.read())["prompt_id"]
+
+        t_submit  = time.monotonic()
+        row("", f"Queued  prompt_id={prompt_id}")
+
+        # ── poll /history until done ───────────────────────────────────
+        deadline = time.monotonic() + 3600   # 1-hour hard limit (MIOpen first-run tuning can take long)
+        _poll_n  = 0
+        while time.monotonic() < deadline:
+            # Stream ComfyUI output so we can see what it's doing
+            _drain_comfyui(_comfyui_proc)
+
+            # Detect server death early — don't wait 600 s for nothing
+            if _comfyui_proc.poll() is not None:
+                _drain_comfyui(_comfyui_proc)  # final drain
+                raise RuntimeError(
+                    f"ComfyUI server exited unexpectedly (code {_comfyui_proc.returncode})"
+                )
+
+            time.sleep(5)
+            _poll_n += 1
+            hist_url = f"http://127.0.0.1:{_BENCH_PORT}/history/{prompt_id}"
+            try:
+                hist_resp = urllib.request.urlopen(hist_url, timeout=10)
+                hist      = json.loads(hist_resp.read())
+            except Exception as _he:
+                if _poll_n % 6 == 0:  # print every ~30 s so we know it's alive
+                    print(f"  [poll] waiting... ({int(time.monotonic()-t_submit)}s elapsed, /history: {_he})", flush=True)
+                continue
+
+            if prompt_id in hist:
+                entry = hist[prompt_id]
+                status = entry.get("status", {})
+                if status.get("status_str") == "error":
+                    msgs = status.get("messages", [])
+                    raise RuntimeError(f"ComfyUI generation error: {msgs}")
+                if status.get("completed", False):
+                    break
+        else:
+            raise RuntimeError("Generation timed out after 3600 s")
+
+        total_sec      = time.monotonic() - t_submit
+        steps_per_sec  = _STEPS / total_sec
+
+        row("Total time",   f"{total_sec:.1f} s")
+        row("Steps/sec",    f"{steps_per_sec:.2f}")
+        row("ms/step",      f"{total_sec * 1000 / _STEPS:.0f} ms")
+
+        results["comfyui_gen"] = {
+            "model":          ckpt,
+            "steps":          _STEPS,
+            "width":          _WIDTH,
+            "height":         _HEIGHT,
+            "total_sec":      round(total_sec, 2),
+            "steps_per_sec":  round(steps_per_sec, 2),
+            "ms_per_step":    round(total_sec * 1000 / _STEPS, 0),
+        }
+        save_results(results, output_path)
+
+    except Exception as exc:
+        # Drain any remaining ComfyUI output before printing the error
+        if _comfyui_proc:
+            _drain_comfyui(_comfyui_proc)
+        row("ComfyUI generation", f"failed: {exc}")
+        results["comfyui_gen"] = {"error": str(exc)}
+    finally:
+        if _comfyui_proc and _comfyui_proc.poll() is None:
+            _comfyui_proc.send_signal(signal.SIGTERM)
+            try:
+                _comfyui_proc.wait(timeout=15)
+            except subprocess.TimeoutExpired:
+                _comfyui_proc.kill()
+
+# ─────────────────────── summary ─────────────────────────────────────────────
+
 header("SUMMARY")
 row("GPU",                f"{gpu_name}  [{gfx_version}]")
 row("FP16 TFLOPS",        f"{results.get('matmul_fp16_tflops', 'n/a')} TFLOPS")
@@ -410,6 +662,20 @@ if isinstance(tc_ms, float):
         f"({results.get('torch_compile_speedup', '?')}× vs native)")
 else:
     row("SDPA (torch.compile)", "not available")
+
+gen = results.get("comfyui_gen")
+if isinstance(gen, dict) and "total_sec" in gen:
+    row("ComfyUI generation",
+        f"{gen['total_sec']:.1f} s",
+        f"  {gen.get('steps_per_sec', '?'):.2f} steps/s  "
+        f"({gen.get('model', '?')}, {gen.get('steps', '?')} steps, "
+        f"{gen.get('width', '?')}×{gen.get('height', '?')})")
+elif isinstance(gen, dict) and "error" in gen:
+    row("ComfyUI generation", f"failed — {gen['error'][:80]}")
+elif gen == "no_model":
+    row("ComfyUI generation", "skipped — no checkpoint found in /data/models/checkpoints")
+else:
+    row("ComfyUI generation", "skipped")
 
 # ─────────────────────── save final JSON ────────────────────────────────────
 save_results(results, output_path)
